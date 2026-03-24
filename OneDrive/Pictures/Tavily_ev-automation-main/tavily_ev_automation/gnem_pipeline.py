@@ -1152,9 +1152,11 @@ def probable_pdf(row: dict) -> bool:
     return any(k in text for k in PDF_HINT_KEYWORDS)
 
 
-def read_queries(path: Path, max_queries: int | None = None) -> list[str]:
+def read_queries(path: Path, max_queries: int | None = None, query_offset: int = 0) -> list[str]:
     queries = [normalize_space(line) for line in path.read_text(encoding="utf-8").splitlines()]
     queries = [q for q in queries if q]
+    if query_offset and query_offset > 0:
+        queries = queries[query_offset:]
     if max_queries and max_queries > 0:
         return queries[:max_queries]
     return queries
@@ -3070,6 +3072,12 @@ def main() -> int:
         help="Also export final review-ready and registry CSV files. Disabled by default to reduce output clutter.",
     )
     parser.add_argument("--max-queries", type=int, default=1000, help="Max queries to run from query file")
+    parser.add_argument(
+        "--query-offset",
+        type=int,
+        default=0,
+        help="Number of leading queries to skip before applying --max-queries (use 0, 250, 500, 750 for 250-query batches).",
+    )
     parser.add_argument("--max-results", type=int, default=20, help="Tavily results per query")
     parser.add_argument("--search-depth", default="basic", choices=["basic", "advanced"], help="Tavily search depth")
     parser.add_argument(
@@ -3323,7 +3331,7 @@ def main() -> int:
         if not q_path.exists():
             print(f"Error: queries file not found: {q_path}")
             return 1
-        queries = read_queries(q_path, max_queries=args.max_queries)
+        queries = read_queries(q_path, max_queries=args.max_queries, query_offset=max(0, int(args.query_offset)))
         print(f"Loaded {len(queries)} queries from {q_path}")
         stage1_rows = tavily_search_rows(
             queries=queries,

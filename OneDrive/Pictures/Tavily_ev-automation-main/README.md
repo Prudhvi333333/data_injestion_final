@@ -101,6 +101,23 @@ python -m tavily_ev_automation.gnem_pipeline \
   --credibility-threshold 60
 ```
 
+Run in 250-query batches by combining `--query-offset` with `--max-queries 250`:
+```bash
+python -m tavily_ev_automation.gnem_pipeline \
+  --queries-file data/queries/queries_1000.txt \
+  --query-offset 0 \
+  --max-queries 250 \
+  --max-results 20 \
+  --query-mode web_only \
+  --search-depth basic \
+  --output-dir outputs/pipeline_runs/batch_000_249
+```
+
+Subsequent batches use:
+- `--query-offset 250` for queries `251-500`
+- `--query-offset 500` for queries `501-750`
+- `--query-offset 750` for queries `751-1000`
+
 Offline validation with local corpus:
 ```bash
 python -m tavily_ev_automation.gnem_pipeline \
@@ -141,6 +158,8 @@ If you want OpenAI instead of Ollama, use:
 - `--llm-provider openai`
 - `--llm-base-url https://api.openai.com`
 - `--llm-api-key <YOUR_KEY>`
+
+Kimi works through the same OpenAI-compatible path. For a Kimi judge run, use Moonshot's OpenAI-compatible endpoint and a Kimi model such as `kimi-k2.5`.
 
 By default, pipeline stage outputs are written to `outputs/pipeline_runs/<timestamp>/`.
 The pipeline now treats retrieval mode explicitly via `--query-mode {pdf_only,web_only,hybrid}` and defaults to `hybrid`.

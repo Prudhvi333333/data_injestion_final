@@ -92,8 +92,27 @@ try:
 except Exception:  # pragma: no cover - handled at runtime
     fitz = None
 
+def load_shared_env_files() -> None:
+    repo_root = Path(__file__).resolve().parent.parent
+    for env_path in [
+        repo_root / ".env",
+        repo_root / "evAutomationUpdated" / ".env",
+    ]:
+        if env_path.exists():
+            load_dotenv(env_path, override=False)
+    load_dotenv(override=False)
 
-load_dotenv()
+
+def disable_broken_local_proxies() -> None:
+    broken_markers = ("127.0.0.1:9", "localhost:9")
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        value = (os.environ.get(key) or "").strip().lower()
+        if value and any(marker in value for marker in broken_markers):
+            os.environ.pop(key, None)
+
+
+load_shared_env_files()
+disable_broken_local_proxies()
 
 ILLEGAL_XLSX_CHARS_RE = re.compile(r"[\x00-\x08\x0B-\x0C\x0E-\x1F]")
 DEFAULT_QUERY_FILE = Path("data") / "queries" / "queries_1000.txt"
@@ -453,6 +472,22 @@ def sanitize_filename(name: str) -> str:
     name = re.sub(r"\s+", "_", name)
     name = re.sub(r"_+", "_", name)
     return name[:180] if len(name) > 180 else name
+
+
+def safe_output_filename(directory: Path, name: str, *, max_full_path: int = 240) -> str:
+    safe_name = sanitize_filename(name) or "document"
+    suffix = Path(safe_name).suffix
+    stem = Path(safe_name).stem if suffix else safe_name
+    try:
+        dir_len = len(str(directory.resolve()))
+    except Exception:
+        dir_len = len(str(directory))
+    max_name_len = max(48, max_full_path - dir_len - 1)
+    if len(safe_name) <= max_name_len:
+        return safe_name
+    allowed_stem_len = max(16, max_name_len - len(suffix))
+    trimmed_stem = stem[:allowed_stem_len].rstrip("._- ")
+    return f"{trimmed_stem}{suffix}" if suffix else trimmed_stem
 
 
 def filename_to_text(name: str) -> str:
@@ -1857,6 +1892,13 @@ REJECTED_EXPORT_COLUMNS = [
     "Final_Decision",
 ]
 
+DEFAULT_EV_AUTOMATION_READY_DIR = (
+    Path(__file__).resolve().parent.parent
+    / "evAutomationUpdated"
+    / "data"
+    / "tavily ready documents"
+)
+
 
 def existing_file_path(*values: object) -> str:
     for value in values:
@@ -1870,6 +1912,13 @@ def existing_file_path(*values: object) -> str:
         if path.exists() and path.is_file():
             return str(path.resolve())
     return ""
+
+
+def repo_relative_posix(path: Path, root: Path) -> str:
+    try:
+        return path.resolve().relative_to(root.resolve()).as_posix()
+    except Exception:
+        return path.name
 
 
 def populate_source_file_fields(row: dict[str, Any]) -> dict[str, Any]:
@@ -1943,6 +1992,93 @@ def final_rank_sort_key(row: dict[str, Any]) -> tuple[float, float, float, float
         safe_float(row.get("Hybrid_Score")),
         safe_float(row.get("Credibility_Score")),
     )
+
+
+def publish_curated_documents_to_ready_dir(
+    rows: list[dict[str, Any]],
+    ready_dir: Path,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    ready_dir.mkdir(parents=True, exist_ok=True)
+    keep_dir = ready_dir / "keep"
+    review_dir = ready_dir / "review"
+    keep_dir.mkdir(parents=True, exist_ok=True)
+    review_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest_columns = [
+        "Row_Number",
+        "Candidate_ID",
+        "Title",
+        "Final_Decision",
+        "URL",
+        "FilePath",
+        "Filename",
+        "Retrieved_At",
+        "Match_Status",
+    ]
+    unmatched_columns = [
+        "Row_Number",
+        "Candidate_ID",
+        "Title",
+        "Final_Decision",
+        "URL",
+        "Match_Status",
+    ]
+    manifest_rows: list[dict[str, Any]] = []
+    unmatched_rows: list[dict[str, Any]] = []
+    repo_root = ready_dir.parent.parent.parent if ready_dir.parent.name == "data" else ready_dir
+    retrieved_at = datetime.now().isoformat(timespec="seconds")
+
+    for row_number, row in enumerate(rows, start=2):
+        decision = as_text(row.get("Final_Decision"))
+        if decision not in {"keep", "review"}:
+            continue
+
+        source_path = as_text(row.get("Curated_File_Path")) or as_text(row.get("Document_File_Path"))
+        if not source_path or not Path(source_path).exists():
+            unmatched_rows.append(
+                {
+                    "Row_Number": row_number,
+                    "Candidate_ID": as_text(row.get("Candidate_ID")),
+                    "Title": as_text(row.get("Title")),
+                    "Final_Decision": decision,
+                    "URL": as_text(row.get("Document_URL")) or as_text(row.get("URL")),
+                    "Match_Status": "missing_source",
+                }
+            )
+            continue
+
+        source = Path(source_path)
+        target_dir = keep_dir if decision == "keep" else review_dir
+        target_name = safe_output_filename(target_dir, source.name)
+        target = target_dir / target_name
+        suffix = source.suffix
+        stem = target.stem
+        attempt = 2
+        while target.exists() and target.resolve() != source.resolve():
+            target = target_dir / safe_output_filename(target_dir, f"{stem}_{attempt}{suffix}")
+            attempt += 1
+        if not target.exists():
+            shutil.copy2(source, target)
+
+        manifest_rows.append(
+            {
+                "Row_Number": row_number,
+                "Candidate_ID": as_text(row.get("Candidate_ID")),
+                "Title": as_text(row.get("Title")),
+                "Final_Decision": decision,
+                "URL": as_text(row.get("Document_URL")) or as_text(row.get("URL")),
+                "FilePath": repo_relative_posix(target, repo_root),
+                "Filename": target.name,
+                "Retrieved_At": retrieved_at,
+                "Match_Status": "published",
+            }
+        )
+
+    manifest_path = ready_dir / "tavily_ready_documents_manifest.csv"
+    unmatched_path = ready_dir / "tavily_ready_documents_unmatched.csv"
+    pd.DataFrame(manifest_rows, columns=manifest_columns).to_csv(manifest_path, index=False)
+    pd.DataFrame(unmatched_rows, columns=unmatched_columns).to_csv(unmatched_path, index=False)
+    return manifest_rows, unmatched_rows
 
 
 def compute_file_sha256(path_str: str) -> str:
@@ -2558,13 +2694,13 @@ def copy_curated_documents(rows: list[dict[str, Any]], final_docs_dir: Path) -> 
             continue
         target_dir = keep_dir if decision == "keep" else review_dir
         source = Path(source_path)
-        target_name = sanitize_filename(f"{as_text(working.get('Candidate_ID'))}_{source.name}")
+        target_name = safe_output_filename(target_dir, f"{as_text(working.get('Candidate_ID'))}_{source.name}")
         target = target_dir / target_name
         suffix = source.suffix
         stem = target.stem
         attempt = 2
         while target.exists():
-            target = target_dir / f"{stem}_{attempt}{suffix}"
+            target = target_dir / safe_output_filename(target_dir, f"{stem}_{attempt}{suffix}")
             attempt += 1
         shutil.copy2(source, target)
         working["Curated_Copy_Status"] = "copied"
@@ -3185,6 +3321,23 @@ def run_rag_filtering_pipeline(
         )
         print(f"SQLite registry: {sqlite_path}")
 
+    published_ready_manifest_rows: list[dict[str, Any]] = []
+    published_ready_unmatched_rows: list[dict[str, Any]] = []
+    published_ready_dir = ""
+    if not args.skip_ready_docs_publish:
+        ready_dir_str = as_text(args.publish_ready_docs_dir)
+        if ready_dir_str:
+            ready_dir = Path(ready_dir_str)
+            published_ready_manifest_rows, published_ready_unmatched_rows = publish_curated_documents_to_ready_dir(
+                curated_rows,
+                ready_dir,
+            )
+            published_ready_dir = str(ready_dir.resolve())
+            print(
+                "Published curated Tavily documents for evAutomationUpdated: "
+                f"{len(published_ready_manifest_rows)} files -> {published_ready_dir}"
+            )
+
     cleanup_status, cleaned_file_count = cleanup_stage_downloads(
         download_dir,
         keep_stage_downloads=bool(args.keep_stage_downloads),
@@ -3226,6 +3379,9 @@ def run_rag_filtering_pipeline(
         "stage_artifacts_written": bool(args.write_stage_artifacts),
         "csv_exports_written": bool(args.write_csv_exports),
         "promoted_to_review_count": int(promoted_to_review_count),
+        "published_ready_docs_count": int(len(published_ready_manifest_rows)),
+        "published_ready_docs_unmatched_count": int(len(published_ready_unmatched_rows)),
+        "published_ready_docs_dir": published_ready_dir,
         "thresholds": {
             "metadata_threshold": float(args.metadata_threshold),
             "heuristic_threshold": float(args.heuristic_threshold),
@@ -3495,6 +3651,16 @@ def main() -> int:
         "--keep-stage-downloads",
         action="store_true",
         help="Keep the temporary stage2_downloads folder after the run. Disabled by default so final runs clean up temporary downloads.",
+    )
+    parser.add_argument(
+        "--publish-ready-docs-dir",
+        default=str(DEFAULT_EV_AUTOMATION_READY_DIR) if DEFAULT_EV_AUTOMATION_READY_DIR.parent.exists() else "",
+        help="Optional publish target for curated Tavily documents, e.g. evAutomationUpdated/data/tavily ready documents.",
+    )
+    parser.add_argument(
+        "--skip-ready-docs-publish",
+        action="store_true",
+        help="Skip publishing curated documents into the ready-docs handoff folder.",
     )
     parser.add_argument(
         "--curated-min-count",

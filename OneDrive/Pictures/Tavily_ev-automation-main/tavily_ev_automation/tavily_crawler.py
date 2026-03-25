@@ -34,8 +34,28 @@ except Exception:
     PatternFill = None
     get_column_letter = None
 
-# Load .env if present
-load_dotenv()
+def load_shared_env_files() -> None:
+    repo_root = Path(__file__).resolve().parent.parent
+    for env_path in [
+        repo_root / ".env",
+        repo_root / "evAutomationUpdated" / ".env",
+    ]:
+        if env_path.exists():
+            load_dotenv(env_path, override=False)
+    load_dotenv(override=False)
+
+
+def disable_broken_local_proxies() -> None:
+    broken_markers = ("127.0.0.1:9", "localhost:9")
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        value = (os.environ.get(key) or "").strip().lower()
+        if value and any(marker in value for marker in broken_markers):
+            os.environ.pop(key, None)
+
+
+# Load .env files if present
+load_shared_env_files()
+disable_broken_local_proxies()
 
 # Default config (customize as needed)
 CONFIG = {
